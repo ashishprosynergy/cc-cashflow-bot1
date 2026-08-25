@@ -8,72 +8,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+
       - name: Try every credential permutation
         env:
           DOUBLE_CLIENT_ID: ${{ secrets.DOUBLE_CLIENT_ID }}
           DOUBLE_CLIENT_SECRET: ${{ secrets.DOUBLE_CLIENT_SECRET }}
-        run: |
-          python3 - <<'PY'
-import json, os, urllib.error, urllib.parse, urllib.request
-
-raw_id = os.environ["DOUBLE_CLIENT_ID"]
-raw_secret = os.environ["DOUBLE_CLIENT_SECRET"]
-
-cid = raw_id.strip()
-sec = raw_secret.strip()
-
-def tail(s):
-    """The part after the last hyphen - i.e. drop a 'Firm Name-' prefix."""
-    return s.rsplit("-", 1)[-1]
-
-print("=== shape (no values printed) ===")
-print(f"id     : raw_len={len(raw_id)} stripped_len={len(cid)} tail_len={len(tail(cid))}")
-print(f"secret : raw_len={len(raw_secret)} stripped_len={len(sec)} tail_len={len(tail(sec))}")
-if len(raw_id) != len(cid) or len(raw_secret) != len(sec):
-    print("!! whitespace detected - a stray space/newline is in one of the secrets")
-print()
-
-candidates = [
-    ("1 as-is",              cid,       sec),
-    ("2 both hex-only",      tail(cid), tail(sec)),
-    ("3 id as-is, sec hex",  cid,       tail(sec)),
-    ("4 id hex, sec as-is",  tail(cid), sec),
-    ("5 swapped as-is",      sec,       cid),
-    ("6 swapped hex-only",   tail(sec), tail(cid)),
-]
-
-print("=== attempts ===")
-winner = None
-for label, client_id, client_secret in candidates:
-    body = urllib.parse.urlencode({
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret,
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.doublehq.com/oauth/token",
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            got = json.loads(resp.read().decode())
-        if got.get("access_token"):
-            print(f"SUCCESS  [{label}]  -> got an access_token")
-            winner = label
-            break
-        print(f"odd      [{label}]  HTTP 200 but no access_token: {list(got)}")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:180].replace("\n", " ")
-        print(f"fail     [{label}]  HTTP {e.code}  {detail}")
-    except Exception as e:
-        print(f"fail     [{label}]  {type(e).__name__}: {e}")
-
-print()
-if winner:
-    print(f"=== ANSWER: permutation {winner} works ===")
-else:
-    print("=== ANSWER: none worked - the credential itself is not valid ===")
-    print("Next step is Double support: API access may not be enabled for the practice.")
-PY
+        run: python3 scripts/diagnose_auth.py
