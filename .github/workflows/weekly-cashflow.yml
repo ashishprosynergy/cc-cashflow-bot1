@@ -1,4 +1,4 @@
-.github/workflows/weekly-cashflow.ymlname: Weekly C&C Cashflow
+name: Weekly C&C Cashflow
 
 on:
   schedule:
