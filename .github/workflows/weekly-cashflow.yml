@@ -1,0 +1,33 @@
+.github/workflows/weekly-cashflow.ymlname: Weekly C&C Cashflow
+
+on:
+  schedule:
+    # 12:17 UTC every Monday = 8:17am US Eastern (EDT) / 7:17am (EST).
+    # GitHub cron is always UTC and does not follow daylight saving.
+    - cron: "17 12 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Set to 1 to print the numbers WITHOUT posting"
+        required: false
+        default: "0"
+
+# Stop two runs from posting at once if a manual run overlaps the schedule.
+concurrency:
+  group: weekly-cashflow
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull from Double, post to dashboard, verify
+        env:
+          DOUBLE_CLIENT_ID: ${{ secrets.DOUBLE_CLIENT_ID }}
+          DOUBLE_CLIENT_SECRET: ${{ secrets.DOUBLE_CLIENT_SECRET }}
+          DOUBLE_CLIENT_NUM: "624571"
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python3 scripts/post_cashflow.py
