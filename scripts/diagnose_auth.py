@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Throwaway diagnostic: work out which form of the Double credentials is accepted.
+Diagnostic v2: try every AUTHENTICATION METHOD for Double's token endpoint.
 
-Tries the values as stored, with any "Firm Name-" prefix stripped, mixed, and
-swapped. Prints only lengths and pass/fail - never the credential values.
-Delete this file (and diagnose-auth.yml) once the answer is known.
+v1 established that the credentials are 32-hex, whitespace-free, and rejected
+with invalid_client in both orderings when sent as form-body parameters.
+
+invalid_client is the OAuth2 error for failed *client authentication*, and the
+most common cause is that the server wants HTTP Basic auth rather than body
+parameters. This tries both, plus JSON encoding, plus swapped ordering.
+
+Prints only lengths and pass/fail - never the credential values.
 """
 
+import base64
 import json
 import os
 import urllib.error
@@ -16,83 +22,121 @@ import urllib.request
 TOKEN_URL = "https://api.doublehq.com/oauth/token"
 
 
-def tail(s):
-    """The part after the last hyphen - i.e. drop a 'Firm Name-' prefix."""
-    return s.rsplit("-", 1)[-1]
-
-
-def try_pair(label, client_id, client_secret):
-    body = urllib.parse.urlencode(
-        {
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }
-    ).encode()
+def attempt(label, data, headers):
     req = urllib.request.Request(
-        TOKEN_URL,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
+        TOKEN_URL, data=data, headers=headers, method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            got = json.loads(resp.read().decode())
+            raw = resp.read().decode()
+        try:
+            got = json.loads(raw)
+        except ValueError:
+            print(f"odd      [{label}]  HTTP 200 non-JSON: {raw[:120]}")
+            return False
         if got.get("access_token"):
-            print(f"SUCCESS  [{label}]  -> got an access_token")
+            print(f"SUCCESS  [{label}]  -> access_token received")
             return True
         print(f"odd      [{label}]  HTTP 200 but no access_token: {list(got)}")
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:180].replace("\n", " ")
+        detail = e.read().decode("utf-8", "replace")[:200].replace("\n", " ")
         print(f"fail     [{label}]  HTTP {e.code}  {detail}")
     except Exception as e:
         print(f"fail     [{label}]  {type(e).__name__}: {e}")
     return False
 
 
-def main():
-    raw_id = os.environ.get("DOUBLE_CLIENT_ID", "")
-    raw_secret = os.environ.get("DOUBLE_CLIENT_SECRET", "")
+def basic(user, password):
+    token = base64.b64encode(f"{user}:{password}".encode()).decode()
+    return f"Basic {token}"
 
-    if not raw_id or not raw_secret:
+
+FORM = "application/x-www-form-urlencoded"
+JSON_CT = "application/json"
+
+
+def main():
+    cid = os.environ.get("DOUBLE_CLIENT_ID", "").strip()
+    sec = os.environ.get("DOUBLE_CLIENT_SECRET", "").strip()
+
+    if not cid or not sec:
         print("One or both secrets are EMPTY in GitHub.")
-        print(f"  DOUBLE_CLIENT_ID set: {bool(raw_id)}")
-        print(f"  DOUBLE_CLIENT_SECRET set: {bool(raw_secret)}")
         return
 
-    cid = raw_id.strip()
-    sec = raw_secret.strip()
-
-    print("=== shape (no values printed) ===")
-    print(f"id     : raw_len={len(raw_id)} stripped_len={len(cid)} tail_len={len(tail(cid))}")
-    print(f"secret : raw_len={len(raw_secret)} stripped_len={len(sec)} tail_len={len(tail(sec))}")
-    if len(raw_id) != len(cid) or len(raw_secret) != len(sec):
-        print("!! whitespace found - a stray space or newline is inside one of the secrets")
+    print(f"id_len={len(cid)}  secret_len={len(sec)}")
     print()
+    print("=== attempts ===")
 
-    candidates = [
-        ("1 as-is", cid, sec),
-        ("2 both hex-only", tail(cid), tail(sec)),
-        ("3 id as-is, secret hex-only", cid, tail(sec)),
-        ("4 id hex-only, secret as-is", tail(cid), sec),
-        ("5 swapped as-is", sec, cid),
-        ("6 swapped hex-only", tail(sec), tail(cid)),
+    tests = [
+        # A: what we have been doing all along - credentials in the form body.
+        (
+            "A form body (baseline)",
+            urllib.parse.urlencode(
+                {
+                    "grant_type": "client_credentials",
+                    "client_id": cid,
+                    "client_secret": sec,
+                }
+            ).encode(),
+            {"Content-Type": FORM},
+        ),
+        # B: the RFC-preferred way - Basic auth header, grant_type only in body.
+        (
+            "B basic auth header",
+            urllib.parse.urlencode({"grant_type": "client_credentials"}).encode(),
+            {"Content-Type": FORM, "Authorization": basic(cid, sec)},
+        ),
+        # C: belt and braces - Basic header AND body credentials.
+        (
+            "C basic header + body creds",
+            urllib.parse.urlencode(
+                {
+                    "grant_type": "client_credentials",
+                    "client_id": cid,
+                    "client_secret": sec,
+                }
+            ).encode(),
+            {"Content-Type": FORM, "Authorization": basic(cid, sec)},
+        ),
+        # D: Basic auth with the pair reversed, in case of a labelling mix-up.
+        (
+            "D basic auth swapped",
+            urllib.parse.urlencode({"grant_type": "client_credentials"}).encode(),
+            {"Content-Type": FORM, "Authorization": basic(sec, cid)},
+        ),
+        # E: JSON body instead of form encoding.
+        (
+            "E json body",
+            json.dumps(
+                {
+                    "grant_type": "client_credentials",
+                    "client_id": cid,
+                    "client_secret": sec,
+                }
+            ).encode(),
+            {"Content-Type": JSON_CT},
+        ),
+        # F: JSON body plus Basic header.
+        (
+            "F json body + basic header",
+            json.dumps({"grant_type": "client_credentials"}).encode(),
+            {"Content-Type": JSON_CT, "Authorization": basic(cid, sec)},
+        ),
     ]
 
-    print("=== attempts ===")
     winner = None
-    for label, client_id, client_secret in candidates:
-        if try_pair(label, client_id, client_secret):
+    for label, data, headers in tests:
+        if attempt(label, data, headers):
             winner = label
             break
 
     print()
     if winner:
-        print(f"=== ANSWER: permutation {winner} works ===")
+        print(f"=== ANSWER: {winner} works - full automation is unblocked ===")
     else:
-        print("=== ANSWER: none worked - the credential pair itself is not valid ===")
-        print("Next step is Double support: API access may not be enabled for the practice,")
-        print("or the pair has been superseded by a later regeneration.")
+        print("=== ANSWER: every auth method rejected the credential ===")
+        print("This is no longer something the code can fix. The credential is not")
+        print("active on Double's side - contact help@doublehq.com.")
 
 
 if __name__ == "__main__":
